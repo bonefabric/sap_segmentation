@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"io"
 	"log/slog"
 	"net/http"
@@ -26,36 +27,36 @@ func NewImportService(db *sqlx.DB, cfg *config.Config, ctx context.Context) *Imp
 }
 
 func (s *ImportService) ImportData() error {
-	data := make(chan []model.Segmentation, 10)
+	data := make(chan model.Segmentation, 10*s.cfg.ImportBatchSize)
 
-	done := make(chan error, 1)
-	go s.saveData(data, done)
+	eg := &errgroup.Group{}
 
+	eg.Go(func() error {
+		return s.saveData(data)
+	})
+
+	eg.Go(func() error {
+		return s.loadData(data)
+	})
+
+	return eg.Wait()
+}
+
+func (s *ImportService) loadData(data chan<- model.Segmentation) error {
+	defer close(data)
 	offset := 0
-
 	for {
-		select {
-		case <-s.ctx.Done():
-			close(data)
-			return <-done
-		case err := <-done:
-			close(data)
-			return err
-		default:
-			p, err := s.fetchData(offset)
-			if err != nil {
-				close(data)
-				return err
-			}
-			if len(p) == 0 {
-				close(data)
-				return <-done
-			}
-			data <- p
+		p, err := s.fetchData(offset)
 
-			offset += s.cfg.ImportBatchSize
-			time.Sleep(s.cfg.ConnInterval)
+		if err != nil || len(p) == 0 {
+			return err
 		}
+		for _, seg := range p {
+			data <- seg
+		}
+
+		offset += s.cfg.ImportBatchSize
+		time.Sleep(s.cfg.ConnInterval)
 	}
 }
 
@@ -104,33 +105,26 @@ func (s *ImportService) fetchData(offset int) ([]model.Segmentation, error) {
 	return data, nil
 }
 
-func (s *ImportService) saveData(data <-chan []model.Segmentation, done chan<- error) {
-	defer close(done)
-
-	for pages := range data {
+func (s *ImportService) saveData(data <-chan model.Segmentation) error {
+	for seg := range data {
 		tx, err := s.db.Beginx()
 		if err != nil {
-			done <- fmt.Errorf("failed to begin transaction: %w", err)
-			return
+			return fmt.Errorf("failed to begin transaction: %w", err)
 		}
-		for _, seg := range pages {
-			_, err = tx.NamedExec(`
+		_, err = tx.NamedExec(`
             INSERT INTO segmentation (address_sap_id, adr_segment, segment_id)
             VALUES (:address_sap_id, :adr_segment, :segment_id)
             ON CONFLICT (address_sap_id) DO UPDATE
             SET adr_segment = EXCLUDED.adr_segment, segment_id = EXCLUDED.segment_id`, seg)
-			if err != nil {
-				if err := tx.Rollback(); err != nil {
-					slog.Error("failed to rollback transaction", "err", err)
-				}
-				done <- fmt.Errorf("failed to update segmentation: %w", err)
-				return
+		if err != nil {
+			if err := tx.Rollback(); err != nil {
+				slog.Error("failed to rollback transaction", "err", err)
 			}
+			return fmt.Errorf("failed to update segmentation: %w", err)
 		}
 		if err = tx.Commit(); err != nil {
-			done <- fmt.Errorf("failed to commit transaction: %w", err)
-			return
+			return fmt.Errorf("failed to commit transaction: %w", err)
 		}
 	}
-	done <- nil
+	return nil
 }
