@@ -27,19 +27,25 @@ func NewImportService(db *sqlx.DB, cfg *config.Config, ctx context.Context) *Imp
 
 func (s *ImportService) ImportData() error {
 	offset := 0
+out:
 	for {
-		data, err := s.fetchData(offset)
-		if err != nil {
-			return err
+		select {
+		case <-s.ctx.Done():
+			break out
+		default:
+			data, err := s.fetchData(offset)
+			if err != nil {
+				return err
+			}
+			if len(data) == 0 {
+				break
+			}
+			if err = s.saveData(data); err != nil {
+				return err
+			}
+			offset += s.cfg.ImportBatchSize
+			time.Sleep(s.cfg.ConnInterval)
 		}
-		if len(data) == 0 {
-			break
-		}
-		if err = s.saveData(data); err != nil {
-			return err
-		}
-		offset += s.cfg.ImportBatchSize
-		time.Sleep(s.cfg.ConnInterval)
 	}
 	return nil
 }
