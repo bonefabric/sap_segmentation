@@ -62,6 +62,7 @@ func (s *ImportService) fetchData(offset int) ([]model.Segmentation, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", s.cfg.ConnUserAgent)
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(s.cfg.ConnAuthLoginPwd)))
 
 	resp, err := client.Do(req)
@@ -69,6 +70,11 @@ func (s *ImportService) fetchData(offset int) ([]model.Segmentation, error) {
 		slog.Error("failed to fetch data", "err", err)
 		return nil, err
 	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("failed to fetch data, status code: %d", resp.StatusCode)
+	}
+
 	defer func(Body io.ReadCloser) {
 		if err := Body.Close(); err != nil {
 			slog.Error("failed to close response body", "err", err)
@@ -83,7 +89,7 @@ func (s *ImportService) fetchData(offset int) ([]model.Segmentation, error) {
 
 	var data []model.Segmentation
 	if err = json.Unmarshal(body, &data); err != nil {
-		slog.Error("failed to parse response body", "err", err)
+		slog.Error("failed to parse response body", "err", err, "body", string(body))
 		return nil, err
 	}
 	return data, nil
