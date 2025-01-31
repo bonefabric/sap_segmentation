@@ -40,9 +40,12 @@ out:
 			if len(data) == 0 {
 				break
 			}
-			if err = s.saveData(data); err != nil {
-				return err
-			}
+			go func(data []model.Segmentation) {
+				if err = s.saveData(data); err != nil {
+					slog.Error("failed to save data", "err", err)
+				}
+			}(data)
+
 			offset += s.cfg.ImportBatchSize
 			time.Sleep(s.cfg.ConnInterval)
 		}
