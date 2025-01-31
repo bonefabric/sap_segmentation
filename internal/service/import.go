@@ -27,26 +27,29 @@ func NewImportService(db *sqlx.DB, cfg *config.Config, ctx context.Context) *Imp
 
 func (s *ImportService) ImportData() error {
 	data := make(chan []model.Segmentation, 10)
-	defer close(data)
 
 	done := make(chan error, 1)
 	go s.saveData(data, done)
 
 	offset := 0
-out:
+
 	for {
 		select {
 		case <-s.ctx.Done():
+			close(data)
 			return <-done
 		case err := <-done:
+			close(data)
 			return err
 		default:
 			p, err := s.fetchData(offset)
 			if err != nil {
+				close(data)
 				return err
 			}
 			if len(p) == 0 {
-				break out
+				close(data)
+				return <-done
 			}
 			data <- p
 
@@ -54,7 +57,6 @@ out:
 			time.Sleep(s.cfg.ConnInterval)
 		}
 	}
-	return <-done
 }
 
 func (s *ImportService) fetchData(offset int) ([]model.Segmentation, error) {
