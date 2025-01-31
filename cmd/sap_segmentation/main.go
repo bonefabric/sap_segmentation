@@ -33,6 +33,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	defer func(db *sqlx.DB) {
+		if err := db.Close(); err != nil {
+			slog.Error("db close error", "err", err)
+		}
+	}(db)
 
 	importService := service.NewImportService(db, cfg, ctx)
 	if err = importService.ImportData(); err != nil {
