@@ -26,38 +26,40 @@ func NewImportService(db *sqlx.DB, cfg *config.Config, ctx context.Context) *Imp
 }
 
 func (s *ImportService) ImportData() error {
+	data := make(chan []model.Segmentation, 10)
+	defer close(data)
+
+	done := make(chan error, 1)
+	go s.saveData(data, done)
+
 	offset := 0
 out:
 	for {
 		select {
 		case <-s.ctx.Done():
-			break out
+			return <-done
+		case err := <-done:
+			return err
 		default:
-			data, err := s.fetchData(offset)
+			p, err := s.fetchData(offset)
 			if err != nil {
 				return err
 			}
-			if len(data) == 0 {
-				break
+			if len(p) == 0 {
+				break out
 			}
-			go func(data []model.Segmentation) {
-				if err = s.saveData(data); err != nil {
-					slog.Error("failed to save data", "err", err)
-				}
-			}(data)
+			data <- p
 
 			offset += s.cfg.ImportBatchSize
 			time.Sleep(s.cfg.ConnInterval)
 		}
 	}
-	return nil
+	return <-done
 }
 
 func (s *ImportService) fetchData(offset int) ([]model.Segmentation, error) {
 	client := &http.Client{Timeout: s.cfg.ConnTimeout}
 	opts := fmt.Sprintf("%s?p_limit=%d&p_offset=%d", s.cfg.ConnURI, s.cfg.ImportBatchSize, offset)
-
-	slog.Info("fetching data", "uri", opts)
 
 	req, err := http.NewRequestWithContext(s.ctx, "GET", opts, nil)
 	if err != nil {
@@ -95,26 +97,38 @@ func (s *ImportService) fetchData(offset int) ([]model.Segmentation, error) {
 		slog.Error("failed to parse response body", "err", err, "body", string(body))
 		return nil, err
 	}
+	slog.Info("fetched data", "uri", opts)
+
 	return data, nil
 }
 
-func (s *ImportService) saveData(data []model.Segmentation) error {
-	tx, err := s.db.Beginx()
-	if err != nil {
-		return err
-	}
-	for _, seg := range data {
-		_, err = tx.NamedExec(`
+func (s *ImportService) saveData(data <-chan []model.Segmentation, done chan<- error) {
+	defer close(done)
+
+	for pages := range data {
+		tx, err := s.db.Beginx()
+		if err != nil {
+			done <- fmt.Errorf("failed to begin transaction: %w", err)
+			return
+		}
+		for _, seg := range pages {
+			_, err = tx.NamedExec(`
             INSERT INTO segmentation (address_sap_id, adr_segment, segment_id)
             VALUES (:address_sap_id, :adr_segment, :segment_id)
             ON CONFLICT (address_sap_id) DO UPDATE
             SET adr_segment = EXCLUDED.adr_segment, segment_id = EXCLUDED.segment_id`, seg)
-		if err != nil {
-			if err := tx.Rollback(); err != nil {
-				slog.Error("failed to rollback transaction", "err", err)
+			if err != nil {
+				if err := tx.Rollback(); err != nil {
+					slog.Error("failed to rollback transaction", "err", err)
+				}
+				done <- fmt.Errorf("failed to update segmentation: %w", err)
+				return
 			}
-			return err
+		}
+		if err = tx.Commit(); err != nil {
+			done <- fmt.Errorf("failed to commit transaction: %w", err)
+			return
 		}
 	}
-	return tx.Commit()
+	done <- nil
 }
